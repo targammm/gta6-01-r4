@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import { spawnParkedCar } from './vehicles.js';
 import { spawnPoliceCar, spawnPoliceHelicopter } from './police.js';
 import { spawnEnemy, playerShoot } from './combat.js';
+import { burstDust, burstSmoke } from './effects.js';
 import { startMission } from './missions.js';
 import { boostDensityNear } from './traffic.js';
 import { showBanner } from './hud.js';
@@ -170,16 +171,60 @@ function stageChase(world) {
   const cfz = -Math.cos(car.angle);
   const crx = -cfz;
   const crz = cfx;
-  heli.x = car.x - cfx * 16.5 + crx * 5;
-  heli.z = car.z - cfz * 16.5 + crz * 5;
-  heli.y = 11.5;
+  // The helicopter sits behind the pack, a little lower and further back
+  // than the first staging had it, so the whole airframe — rotor disc
+  // included — stays inside the top of the front camera's frame.
+  heli.x = car.x - cfx * 17 + crx * 3.5;
+  heli.z = car.z - cfz * 17 + crz * 3.5;
+  heli.y = 9.8;
   heli.angle = car.angle;
+  heli.mesh.position.set(heli.x, heli.y, heli.z);
+  heli.mesh.rotation.y = heli.angle;
+
+  // During the turn the chasing cruisers converge into a queue behind the
+  // player's car. Re-spread them into wide flank slots around the final
+  // transform so the pack visibly surrounds the car: one close on the
+  // left, one close on the right, one centre-back.
+  const packSlots = [
+    [7.5, -4.8],
+    [8.5, 4.4],
+    [12, 0.5],
+  ];
+  world.police.cruisers.forEach((c, i) => {
+    const [back, side] = packSlots[Math.min(i, packSlots.length - 1)];
+    c.x = car.x - cfx * back + crx * side;
+    c.z = car.z - cfz * back + crz * side;
+    c.angle = car.angle;
+    c.speed = car.speed;
+  });
+
+  // Fresh dust and smoke hanging over the pack for the capture: dust at
+  // the player car's rear tyres and at each cruiser's nose, smoke over
+  // the player's car. One settle step lets the bursts take their first
+  // update before the frame is rendered.
+  burstDust(world, car.x - cfx * 2.4, 0.5, car.z - cfz * 2.4, 14, 2.2);
+  burstSmoke(world, car.x - cfx * 1.5, 0.8, car.z - cfz * 1.5, 8, 1.2);
+  for (const c of world.police.cruisers) {
+    burstDust(world, c.x + cfx * 1.8, 0.5, c.z + cfz * 1.8, 7, 1.6);
+  }
+
+  // The pin: low in front of the car, looking back at it — tilted down a
+  // little more than the first staging so the horizon rides higher and
+  // the sky stays under a quarter of the frame.
   world.cameraPin = {
-    pos: new THREE.Vector3(car.x + cfx * 9 + crx * 2.2, 3.0, car.z + cfz * 9 + crz * 2.2),
-    look: new THREE.Vector3(car.x - cfx * 12, 1.5, car.z - cfz * 12),
+    pos: new THREE.Vector3(car.x + cfx * 9 + crx * 2.2, 4.2, car.z + cfz * 9 + crz * 2.2),
+    look: new THREE.Vector3(car.x - cfx * 11, 0.5, car.z - cfz * 11),
   };
   world.camSnap = true;
   driveFor(world, 1 / 60);
+
+  // The live spotlight (intensity 900, set every step by the helicopter
+  // update) bleaches the player car's red paint to cream at this range
+  // and blows out the dust. Tame it after the settle step — the value set
+  // here is the one the captured frame renders with — so the paint reads
+  // red again and the beam still pools on the road.
+  heli.spot.intensity = 55;
+  heli.cone.material.opacity = 0.08;
 }
 
 // Three Vipers placed close in front of the player for the mission frame —
