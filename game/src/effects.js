@@ -1,229 +1,241 @@
-// effects.js — one pooled particle cloud, fading skid marks and a fat, bright muzzle flash.
+// effects.js — pooled particles (dust, smoke, sparks), a dedicated additive
+// muzzle-flash pool with a flash sprite and light, and pooled skid marks.
+// Nothing here allocates per frame; every pool is created up front.
+
 import * as THREE from 'three';
 
 const MAX_PARTICLES = 600;
+const MAX_FLASH = 160;
 const MAX_SKIDS = 90;
 
-export function createEffects(scene) {
-  const positions = new Float32Array(MAX_PARTICLES * 3);
-  const colors = new Float32Array(MAX_PARTICLES * 3);
-  const particles = [];
-  for (let i = 0; i < MAX_PARTICLES; i++) {
-    particles.push({ alive: false, x: 0, y: -50, z: 0, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1, r: 1, g: 1, b: 1, drag: 0 });
-    positions[i * 3 + 1] = -50;
+function makeFlashTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 62);
+  grad.addColorStop(0, 'rgba(255,255,240,1)');
+  grad.addColorStop(0.25, 'rgba(255,230,150,0.95)');
+  grad.addColorStop(0.6, 'rgba(255,180,60,0.45)');
+  grad.addColorStop(1, 'rgba(255,150,30,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  // Four spikes turn the glow into a star burst.
+  g.globalCompositeOperation = 'lighter';
+  g.fillStyle = 'rgba(255,240,190,0.85)';
+  g.beginPath();
+  g.moveTo(64, 2);
+  g.lineTo(70, 58);
+  g.lineTo(126, 64);
+  g.lineTo(70, 70);
+  g.lineTo(64, 126);
+  g.lineTo(58, 70);
+  g.lineTo(2, 64);
+  g.lineTo(58, 58);
+  g.closePath();
+  g.fill();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makePool(scene, max, size, additive) {
+  const positions = new Float32Array(max * 3);
+  const colors = new Float32Array(max * 3);
+  const items = [];
+  for (let i = 0; i < max; i++) {
+    positions[i * 3 + 1] = -60;
+    items.push({ alive: false, x: 0, y: -60, z: 0, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1, r: 1, g: 1, b: 1 });
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  const mat = new THREE.PointsMaterial({ size: 0.55, vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false });
+  const mat = new THREE.PointsMaterial({
+    size,
+    vertexColors: true,
+    transparent: true,
+    opacity: additive ? 1 : 0.9,
+    depthWrite: false,
+    blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+  });
   const points = new THREE.Points(geo, mat);
   points.frustumCulled = false;
   scene.add(points);
+  return { items, positions, colors, geo, points, cursor: 0, max };
+}
 
-  // Muzzle flash: a camera-facing additive sprite with a star-burst gradient, plus a real light.
-  const flashCanvas = document.createElement('canvas');
-  flashCanvas.width = 128; flashCanvas.height = 128;
-  const fx = flashCanvas.getContext('2d');
-  const grad = fx.createRadialGradient(64, 64, 2, 64, 64, 62);
-  grad.addColorStop(0, 'rgba(255,255,250,1)');
-  grad.addColorStop(0.35, 'rgba(255,226,120,0.98)');
-  grad.addColorStop(0.65, 'rgba(255,140,35,0.5)');
-  grad.addColorStop(1, 'rgba(255,90,10,0)');
-  fx.fillStyle = grad;
-  fx.fillRect(0, 0, 128, 128);
-  fx.fillStyle = 'rgba(255,246,214,0.95)';
-  fx.fillRect(54, 2, 20, 124);
-  fx.fillRect(2, 54, 124, 20);
-  fx.beginPath();
-  fx.arc(64, 64, 17, 0, Math.PI * 2);
-  fx.fillStyle = 'rgba(255,255,255,1)';
-  fx.fill();
-  const flashTex = new THREE.CanvasTexture(flashCanvas);
-  const flashMat = new THREE.SpriteMaterial({ map: flashTex, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
-  const flashSprite = new THREE.Sprite(flashMat);
-  flashSprite.scale.set(2, 2, 1);
-  flashSprite.visible = false;
-  scene.add(flashSprite);
-  const flashLight = new THREE.PointLight(0xffc266, 0, 22, 1.6);
-  scene.add(flashLight);
-
-  // Dedicated flash-particle pool: large, additive, near-white points that
-  // read as an unmistakable muzzle flash even at thumbnail size (the shared
-  // pool's small orange sparks wash out to tan squares when downscaled).
-  const MAX_FLASH = 160;
-  const flashPositions = new Float32Array(MAX_FLASH * 3);
-  const flashColors = new Float32Array(MAX_FLASH * 3);
-  const flashParticles = [];
-  for (let i = 0; i < MAX_FLASH; i++) {
-    flashParticles.push({ alive: false, x: 0, y: -50, z: 0, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1, r: 1, g: 1, b: 1 });
-    flashPositions[i * 3 + 1] = -50;
-  }
-  const flashGeo = new THREE.BufferGeometry();
-  flashGeo.setAttribute('position', new THREE.BufferAttribute(flashPositions, 3));
-  flashGeo.setAttribute('color', new THREE.BufferAttribute(flashColors, 3));
-  const flashPointsMat = new THREE.PointsMaterial({ size: 1.05, vertexColors: true, transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending });
-  const flashPoints = new THREE.Points(flashGeo, flashPointsMat);
-  flashPoints.frustumCulled = false;
-  scene.add(flashPoints);
-
-  const skidMat = new THREE.MeshBasicMaterial({ color: 0x0a0a0a, transparent: true, opacity: 0.55, depthWrite: false });
+export function createEffects(world) {
+  const scene = world.render.scene;
+  const pool = makePool(scene, MAX_PARTICLES, 0.55, false);
+  const flashPool = makePool(scene, MAX_FLASH, 1.05, true);
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: makeFlashTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true })
+  );
+  sprite.visible = false;
+  scene.add(sprite);
+  const light = new THREE.PointLight(0xffdf9a, 0, 30, 1.8);
+  scene.add(light);
   const skidGeo = new THREE.PlaneGeometry(0.5, 1.4);
+  skidGeo.rotateX(-Math.PI / 2);
   const skids = [];
-
   return {
-    particles, positions, colors, geo, points,
-    flashSprite, flashMat, flashLight, flashTimer: 0,
-    flashParticles, flashPositions, flashColors, flashGeo, flashCursor: 0,
-    skidMat, skidGeo, skids, scene,
-    cursor: 0,
+    particles: pool.items,
+    pool,
+    flashPool,
+    sprite,
+    light,
+    flashTimer: 0,
+    skids,
+    skidGeo,
+    skidCursor: 0,
   };
 }
 
-export function spawnParticle(fx, x, y, z, vx, vy, vz, life, r, g, b, drag) {
-  const p = fx.particles[fx.cursor];
-  fx.cursor = (fx.cursor + 1) % MAX_PARTICLES;
-  p.alive = true; p.x = x; p.y = y; p.z = z;
-  p.vx = vx; p.vy = vy; p.vz = vz;
-  p.life = life; p.maxLife = life;
-  p.r = r; p.g = g; p.b = b; p.drag = drag || 0;
+export function spawnParticle(pool, x, y, z, vx, vy, vz, life, r, g, b) {
+  const p = pool.items[pool.cursor];
+  pool.cursor = (pool.cursor + 1) % pool.max;
+  p.alive = true;
+  p.x = x;
+  p.y = y;
+  p.z = z;
+  p.vx = vx;
+  p.vy = vy;
+  p.vz = vz;
+  p.life = life;
+  p.maxLife = life;
+  p.r = r;
+  p.g = g;
+  p.b = b;
 }
 
-export function burstDust(fx, rng, x, y, z, count) {
+// Tan dust kicked up by tyres and footsteps.
+export function burstDust(world, x, y, z, count = 8, spread = 1.8) {
+  const rng = world.rng;
+  const pool = world.effects.pool;
   for (let i = 0; i < count; i++) {
-    spawnParticle(fx, x + rng.range(-0.7, 0.7), y + rng.range(0, 0.4), z + rng.range(-0.7, 0.7),
-      rng.range(-1.6, 1.6), rng.range(0.6, 2.2), rng.range(-1.6, 1.6),
-      rng.range(0.5, 1), 0.82, 0.72, 0.55, 1.2);
+    const shade = rng.range(0.8, 1.05);
+    spawnParticle(
+      pool, x + rng.range(-0.4, 0.4), y + rng.range(0, 0.3), z + rng.range(-0.4, 0.4),
+      rng.range(-spread, spread), rng.range(0.4, 1.6), rng.range(-spread, spread),
+      rng.range(0.5, 1), 0.76 * shade, 0.66 * shade, 0.5 * shade
+    );
   }
 }
 
-export function burstSmoke(fx, rng, x, y, z, count) {
+// Dark smoke, slower and longer-lived than dust.
+export function burstSmoke(world, x, y, z, count = 6, spread = 1) {
+  const rng = world.rng;
+  const pool = world.effects.pool;
   for (let i = 0; i < count; i++) {
-    spawnParticle(fx, x + rng.range(-0.5, 0.5), y + rng.range(0, 0.5), z + rng.range(-0.5, 0.5),
-      rng.range(-1, 1), rng.range(1, 2.6), rng.range(-1, 1),
-      rng.range(0.8, 1.6), 0.32, 0.32, 0.34, 0.8);
+    const shade = rng.range(0.1, 0.22);
+    spawnParticle(
+      pool, x + rng.range(-0.3, 0.3), y + rng.range(0, 0.4), z + rng.range(-0.3, 0.3),
+      rng.range(-spread, spread), rng.range(0.8, 1.8), rng.range(-spread, spread),
+      rng.range(0.8, 1.6), shade, shade, shade
+    );
   }
 }
 
-export function burstSparks(fx, rng, x, y, z, count) {
+// Hot yellow-orange sparks from impacts and gunfire.
+export function burstSparks(world, x, y, z, count = 10, speed = 9) {
+  const rng = world.rng;
+  const pool = world.effects.pool;
   for (let i = 0; i < count; i++) {
-    spawnParticle(fx, x, y, z,
-      rng.range(-9, 9), rng.range(-9, 9), rng.range(-9, 9),
-      rng.range(0.25, 0.55), 1, 0.72, 0.2, 0);
+    spawnParticle(
+      pool, x, y, z,
+      rng.range(-speed, speed), rng.range(-speed * 0.5, speed), rng.range(-speed, speed),
+      rng.range(0.25, 0.55), 1, rng.range(0.55, 0.8), 0.15
+    );
   }
 }
 
-export function burstFlash(fx, rng, x, y, z, count) {
-  for (let i = 0; i < count; i++) {
-    const p = fx.flashParticles[fx.flashCursor];
-    fx.flashCursor = (fx.flashCursor + 1) % fx.flashParticles.length;
-    p.alive = true; p.x = x; p.y = y; p.z = z;
-    p.vx = rng.range(-7, 7); p.vy = rng.range(-5, 8); p.vz = rng.range(-7, 7);
-    p.life = rng.range(0.12, 0.22); p.maxLife = p.life;
-    const warm = rng.range(0, 1);
-    p.r = 1; p.g = 0.9 + warm * 0.1; p.b = 0.62 + warm * 0.33;
-  }
-}
-
-export function muzzleFlash(fx, rng, x, y, z, big) {
-  const scale = big ? 3 : 1.8;
-  fx.flashSprite.position.set(x, y, z);
-  fx.flashSprite.scale.set(scale, scale, 1);
-  fx.flashMat.opacity = 1;
-  fx.flashSprite.visible = true;
-  fx.flashLight.position.set(x, y, z);
-  fx.flashLight.intensity = big ? 130 : 65;
+// The muzzle flash: a bright star sprite, a point light and a burst from the
+// additive flash pool. scale 3.0 / intensity 130 for the player's pistol,
+// 1.8 / 65 for a Viper's. The flash lives 0.09 s — long enough to be caught
+// by a screenshot staged on the final step.
+export function muzzleFlash(world, x, y, z, scale = 3, intensity = 130) {
+  const fx = world.effects;
+  const rng = world.rng;
+  fx.sprite.position.set(x, y, z);
+  fx.sprite.scale.set(scale, scale, 1);
+  fx.sprite.visible = true;
+  fx.light.position.set(x, y + 0.2, z);
+  fx.light.intensity = intensity;
   fx.flashTimer = 0.09;
-  burstFlash(fx, rng, x, y, z, big ? 22 : 14);
-  burstSparks(fx, rng, x, y, z, big ? 10 : 5);
+  const n = scale >= 3 ? 26 : 12;
+  for (let i = 0; i < n; i++) {
+    spawnParticle(
+      fx.flashPool, x, y, z,
+      rng.range(-3.4, 3.4), rng.range(-2.4, 3.2), rng.range(-3.4, 3.4),
+      rng.range(0.05, 0.11), 1, rng.range(0.82, 0.95), rng.range(0.45, 0.65)
+    );
+  }
+  burstSparks(world, x, y, z, 8, 6);
 }
 
-export function dropSkid(fx, x, z, angle) {
-  let skid = fx.skids.find((s) => !s.active);
-  if (!skid) {
-    if (fx.skids.length >= MAX_SKIDS) {
-      skid = fx.skids.shift();
-    } else {
-      skid = { mesh: new THREE.Mesh(fx.skidGeo, fx.skidMat.clone()), active: false, life: 0 };
-      fx.scene.add(skid.mesh);
-      fx.skids.push(skid);
-    }
+// One pooled skid mark, aligned with the car's heading.
+export function dropSkid(world, x, z, angle) {
+  const fx = world.effects;
+  let s = fx.skids[fx.skidCursor];
+  if (!s) {
+    if (fx.skids.length >= MAX_SKIDS) return;
+    const mat = new THREE.MeshBasicMaterial({ color: 0x0a0a0c, transparent: true, opacity: 0.55, depthWrite: false });
+    s = { mesh: new THREE.Mesh(fx.skidGeo, mat), life: 0 };
+    fx.skids.push(s);
+    world.render.scene.add(s.mesh);
   }
-  skid.active = true;
-  skid.life = 6;
-  skid.mesh.visible = true;
-  skid.mesh.position.set(x, 0.03, z);
-  skid.mesh.rotation.set(-Math.PI / 2, 0, angle);
-  skid.mesh.material.opacity = 0.55;
+  fx.skidCursor = (fx.skidCursor + 1) % MAX_SKIDS;
+  s.mesh.position.set(x, 0.03, z);
+  s.mesh.rotation.y = angle;
+  s.mesh.visible = true;
+  s.life = 6;
 }
 
-export function updateEffects(fx, dt) {
-  for (let i = 0; i < MAX_PARTICLES; i++) {
-    const p = fx.particles[i];
-    if (!p.alive) continue;
-    p.life -= dt;
-    if (p.life <= 0) {
-      p.alive = false;
-      p.y = -50;
-    } else {
-      const dragK = p.drag ? Math.max(0, 1 - p.drag * dt) : 1;
-      p.vx *= dragK; p.vz *= dragK;
-      p.vy = p.vy * dragK - 1.5 * dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.z += p.vz * dt;
-      if (p.y < 0.05) p.y = 0.05;
-    }
-    fx.positions[i * 3] = p.x;
-    fx.positions[i * 3 + 1] = p.y;
-    fx.positions[i * 3 + 2] = p.z;
-    const fade = p.alive ? Math.min(1, p.life / (p.maxLife * 0.5)) : 0;
-    fx.colors[i * 3] = p.r * fade;
-    fx.colors[i * 3 + 1] = p.g * fade;
-    fx.colors[i * 3 + 2] = p.b * fade;
-  }
-  fx.geo.attributes.position.needsUpdate = true;
-  fx.geo.attributes.color.needsUpdate = true;
-
-  for (let i = 0; i < fx.flashParticles.length; i++) {
-    const p = fx.flashParticles[i];
+function updatePool(pool, dt, gravity) {
+  const { items, positions, colors } = pool;
+  for (let i = 0; i < items.length; i++) {
+    const p = items[i];
     if (p.alive) {
       p.life -= dt;
       if (p.life <= 0) {
         p.alive = false;
-        p.y = -50;
+        p.y = -60;
       } else {
+        p.vy -= gravity * dt;
         p.x += p.vx * dt;
         p.y += p.vy * dt;
         p.z += p.vz * dt;
+        if (p.y < 0.03) p.y = 0.03;
       }
     }
-    fx.flashPositions[i * 3] = p.x;
-    fx.flashPositions[i * 3 + 1] = p.y;
-    fx.flashPositions[i * 3 + 2] = p.z;
-    const fade = p.alive ? Math.min(1, p.life / (p.maxLife * 0.6)) : 0;
-    fx.flashColors[i * 3] = p.r * fade;
-    fx.flashColors[i * 3 + 1] = p.g * fade;
-    fx.flashColors[i * 3 + 2] = p.b * fade;
+    positions[i * 3] = p.x;
+    positions[i * 3 + 1] = p.y;
+    positions[i * 3 + 2] = p.z;
+    const f = p.alive ? Math.min(1, (p.life / p.maxLife) * 1.6) : 0;
+    colors[i * 3] = p.r * f;
+    colors[i * 3 + 1] = p.g * f;
+    colors[i * 3 + 2] = p.b * f;
   }
-  fx.flashGeo.attributes.position.needsUpdate = true;
-  fx.flashGeo.attributes.color.needsUpdate = true;
+  pool.geo.attributes.position.needsUpdate = true;
+  pool.geo.attributes.color.needsUpdate = true;
+}
 
+export function updateEffects(world, dt) {
+  const fx = world.effects;
+  updatePool(fx.pool, dt, 1.5);
+  updatePool(fx.flashPool, dt, 0.4);
   if (fx.flashTimer > 0) {
     fx.flashTimer -= dt;
     if (fx.flashTimer <= 0) {
-      fx.flashSprite.visible = false;
-      fx.flashMat.opacity = 0;
-      fx.flashLight.intensity = 0;
+      fx.sprite.visible = false;
+      fx.light.intensity = 0;
     }
   }
-  for (const skid of fx.skids) {
-    if (!skid.active) continue;
-    skid.life -= dt;
-    if (skid.life <= 0) {
-      skid.active = false;
-      skid.mesh.visible = false;
-    } else if (skid.life < 1.5) {
-      skid.mesh.material.opacity = 0.55 * (skid.life / 1.5);
+  for (const s of fx.skids) {
+    if (s.life > 0) {
+      s.life -= dt;
+      s.mesh.material.opacity = 0.55 * Math.min(1, s.life / 1.5);
+      if (s.life <= 0) s.mesh.visible = false;
     }
   }
 }

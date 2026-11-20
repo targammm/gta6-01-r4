@@ -1,165 +1,203 @@
-// player.js — Rico Vale on foot: movement, jumping, building collision, driving and the chase camera.
+// player.js — Rico Vale on foot (walk, sprint, jump, building collision,
+// health regen), the driving seat (delegating to vehicles.js), and the
+// chase camera for both, plus the slow title orbit. The model's front is
+// -Z, so mesh.rotation.y equals the heading directly.
+
 import * as THREE from 'three';
-import { PLAYER, PALETTE } from './config.js';
-import { clamp, damp, angleDiff } from './random.js';
+import { PLAYER } from './config.js';
+import { clamp, damp, angleDamp } from './random.js';
+import { readMoveAxes, driveAxes } from './input.js';
 import { pointInBuilding, clampToCity } from './city.js';
 import { driveCar } from './vehicles.js';
 import { burstDust } from './effects.js';
 
-export function createPlayer(state) {
-  const group = new THREE.Group();
-  const legs = new THREE.Mesh(
-    new THREE.BoxGeometry(0.52, 0.62, 0.3),
-    new THREE.MeshLambertMaterial({ color: 0x27364f })
-  );
-  legs.position.y = 0.31;
-  group.add(legs);
-  const torso = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.34, 0.62, 3, 8),
-    new THREE.MeshLambertMaterial({ color: PALETTE.playerJacket })
-  );
-  torso.position.y = 1.05;
+function buildPlayerMesh() {
+  const g = new THREE.Group();
+  const legMat = new THREE.MeshLambertMaterial({ color: 0x27324e });
+  const jacketMat = new THREE.MeshLambertMaterial({ color: 0x0f766e });
+  const skinMat = new THREE.MeshLambertMaterial({ color: 0xe8b08a });
+  const capMat = new THREE.MeshLambertMaterial({ color: 0xffc61a });
+  for (const s of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.78, 0.24), legMat);
+    leg.position.set(s * 0.14, 0.39, 0);
+    leg.castShadow = true;
+    g.add(leg);
+  }
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.62, 4, 10), jacketMat);
+  torso.position.y = 1.18;
   torso.castShadow = true;
-  group.add(torso);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.21, 10, 8),
-    new THREE.MeshLambertMaterial({ color: 0xe8b98d })
-  );
-  head.position.y = 1.74;
-  group.add(head);
-  const hat = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.23, 0.3, 0.18, 10),
-    new THREE.MeshLambertMaterial({ color: PALETTE.playerHat })
-  );
-  hat.position.y = 1.92;
-  group.add(hat);
-  group.position.set(PLAYER.spawnX, 0, PLAYER.spawnZ);
-  state.render.scene.add(group);
-  const player = {
-    mesh: group, x: PLAYER.spawnX, y: 0, z: PLAYER.spawnZ,
-    vx: 0, vz: 0, vy: 0, heading: PLAYER.spawnHeading,
-    health: PLAYER.maxHealth, inCar: null, walkPhase: 0, onGround: true,
-  };
-  return player;
+  g.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 12, 10), skinMat);
+  head.position.y = 1.86;
+  head.castShadow = true;
+  g.add(head);
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.28, 0.13, 12), capMat);
+  cap.position.y = 2.06;
+  g.add(cap);
+  const brim = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.05, 0.3), capMat);
+  brim.position.set(0, 2.0, -0.32);
+  g.add(brim);
+  return g;
 }
 
-export function updatePlayer(state, dt) {
-  const p = state.player;
-  const input = state.input;
-  const axes = state.moveAxes;
-  const run = input.keys.has('ShiftLeft') || input.keys.has('ShiftRight');
-  const speed = run ? PLAYER.runSpeed : PLAYER.walkSpeed;
-  const camYaw = state.camYaw;
-  const sin = Math.sin(camYaw);
-  const cos = Math.cos(camYaw);
-  const wx = (axes.strafe * cos - axes.forward * sin);
-  const wz = (axes.strafe * -sin - axes.forward * cos);
-  const len = Math.hypot(wx, wz) || 1;
-  const tx = axes.forward || axes.strafe ? (wx / len) * speed : 0;
-  const tz = axes.forward || axes.strafe ? (wz / len) * speed : 0;
-  p.vx = damp(p.vx, tx, PLAYER.accelDamp, dt);
-  p.vz = damp(p.vz, tz, PLAYER.accelDamp, dt);
+export function createPlayer(world) {
+  const mesh = buildPlayerMesh();
+  mesh.position.set(PLAYER.spawn.x, 0, PLAYER.spawn.z);
+  world.render.scene.add(mesh);
+  return {
+    x: PLAYER.spawn.x,
+    z: PLAYER.spawn.z,
+    y: 0,
+    vx: 0,
+    vz: 0,
+    vy: 0,
+    heading: PLAYER.spawn.heading,
+    health: PLAYER.maxHealth,
+    inCar: null,
+    mesh,
+    walkPhase: 0,
+    grounded: true,
+  };
+}
+
+// Push the player out of a building footprint along the shallowest axis.
+function resolveBuilding(world, p) {
+  const b = pointInBuilding(world.city, p.x, p.z, PLAYER.radius);
+  if (!b) return;
+  const dxl = p.x - (b.minX - PLAYER.radius);
+  const dxr = b.maxX + PLAYER.radius - p.x;
+  const dzl = p.z - (b.minZ - PLAYER.radius);
+  const dzr = b.maxZ + PLAYER.radius - p.z;
+  const m = Math.min(dxl, dxr, dzl, dzr);
+  if (m === dxl) {
+    p.x = b.minX - PLAYER.radius;
+    p.vx *= 0.4;
+  } else if (m === dxr) {
+    p.x = b.maxX + PLAYER.radius;
+    p.vx *= 0.4;
+  } else if (m === dzl) {
+    p.z = b.minZ - PLAYER.radius;
+    p.vz *= 0.4;
+  } else {
+    p.z = b.maxZ + PLAYER.radius;
+    p.vz *= 0.4;
+  }
+}
+
+export function updatePlayer(world, dt) {
+  const p = world.player;
+  const input = world.input;
+  world.camYaw -= input.yawDelta * 0.0032;
+  world.camPitch = clamp(world.camPitch + input.pitchDelta * 0.0022, -0.15, 0.9);
+
+  const axes = readMoveAxes(input);
+  const fwdX = -Math.sin(world.camYaw);
+  const fwdZ = -Math.cos(world.camYaw);
+  const rightX = -fwdZ;
+  const rightZ = fwdX;
+  let wx = fwdX * axes.forward + rightX * axes.strafe;
+  let wz = fwdZ * axes.forward + rightZ * axes.strafe;
+  const len = Math.hypot(wx, wz);
+  if (len > 1) {
+    wx /= len;
+    wz /= len;
+  }
+  const running = input.keys.has('ShiftLeft') || input.keys.has('ShiftRight');
+  const targetSpeed = len > 0 ? (running ? PLAYER.runSpeed : PLAYER.walkSpeed) : 0;
+  p.vx = damp(p.vx, wx * targetSpeed, 12, dt);
+  p.vz = damp(p.vz, wz * targetSpeed, 12, dt);
   p.x += p.vx * dt;
   p.z += p.vz * dt;
 
-  if ((axes.forward || axes.strafe)) {
+  const speed2d = Math.hypot(p.vx, p.vz);
+  if (speed2d > 0.6) {
     const targetHeading = Math.atan2(-p.vx, -p.vz);
-    p.heading += angleDiff(p.heading, targetHeading) * Math.min(1, dt * 14);
-    p.walkPhase += dt * (run ? 11 : 8);
-    if (state.rng.chance(0.03)) {
-      burstDust(state.effects, state.rng, p.x, 0.15, p.z, 1);
-    }
+    p.heading = angleDamp(p.heading, targetHeading, 14, dt);
+    p.walkPhase += speed2d * dt * 1.7;
+    if (world.rng.chance(0.05)) burstDust(world, p.x, 0.08, p.z, 1, 0.5);
   }
-  if (input.keys.has('Space') && p.onGround) {
+
+  if ((input.pressed.has('Space')) && p.grounded) {
     p.vy = PLAYER.jumpSpeed;
-    p.onGround = false;
+    p.grounded = false;
   }
-  if (!p.onGround) {
-    p.vy -= PLAYER.gravity * dt;
-    p.y += p.vy * dt;
-    if (p.y <= 0) {
-      p.y = 0;
-      p.vy = 0;
-      p.onGround = true;
-    }
+  p.vy -= PLAYER.gravity * dt;
+  p.y += p.vy * dt;
+  if (p.y <= 0) {
+    p.y = 0;
+    p.vy = 0;
+    p.grounded = true;
   }
-  const hit = pointInBuilding(state.city, p.x, p.z, PLAYER.radius);
-  if (hit) {
-    const dxl = p.x - (hit.x - hit.hw - PLAYER.radius);
-    const dxr = (hit.x + hit.hw + PLAYER.radius) - p.x;
-    const dzl = p.z - (hit.z - hit.hd - PLAYER.radius);
-    const dzr = (hit.z + hit.hd + PLAYER.radius) - p.z;
-    const min = Math.min(dxl, dxr, dzl, dzr);
-    if (min === dxl) p.x = hit.x - hit.hw - PLAYER.radius;
-    else if (min === dxr) p.x = hit.x + hit.hw + PLAYER.radius;
-    else if (min === dzl) p.z = hit.z - hit.hd - PLAYER.radius;
-    else p.z = hit.z + hit.hd + PLAYER.radius;
-    p.vx *= 0.4;
-    p.vz *= 0.4;
-  }
-  const pos = { x: p.x, z: p.z };
-  clampToCity(pos, 2);
-  p.x = pos.x;
-  p.z = pos.z;
-  if (state.wanted.level < 1 && p.health > 0 && p.health < PLAYER.maxHealth) {
+
+  resolveBuilding(world, p);
+  clampToCity(p, 2);
+
+  if (world.wanted.level < 1 && p.health > 0 && p.health < PLAYER.maxHealth) {
     p.health = Math.min(PLAYER.maxHealth, p.health + 2 * dt);
   }
-  p.mesh.position.set(p.x, p.y + Math.abs(Math.sin(p.walkPhase)) * 0.06, p.z);
+
+  const bob = Math.abs(Math.sin(p.walkPhase)) * 0.06;
+  p.mesh.position.set(p.x, p.y + bob, p.z);
   p.mesh.rotation.y = p.heading;
 }
 
-export function updateDriving(state, dt) {
-  const p = state.player;
+export function updateDriving(world, dt) {
+  const p = world.player;
   const car = p.inCar;
   if (!car) return;
-  const axes = state.driveAxes;
-  driveCar(state, car, axes.throttle, axes.steer, axes.brake, dt);
+  world.camYaw -= world.input.yawDelta * 0.0032 * 0.12;
+  const axes = world.driveInput || driveAxes(world.input);
+  driveCar(world, car, axes.throttle, axes.steer, axes.brake, dt);
   p.x = car.x;
   p.z = car.z;
   p.heading = car.angle;
 }
 
-export function updateCamera(state, dt) {
-  const cam = state.render.camera;
-  const p = state.player;
-  if (state.phase === 'title') {
-    const t = state.elapsed * (Math.PI * 2 / 126);
-    cam.position.set(Math.cos(t) * 130, 72, Math.sin(t) * 130);
+// The chase camera: smoothed position and look target behind the player or
+// the car, mouse pitch lifting the camera, impact shake on top. A pinned
+// camera (screenshot staging) wins over everything.
+export function updateCamera(world, dt) {
+  const cam = world.render.camera;
+  if (world.cameraPin) {
+    cam.position.copy(world.cameraPin.pos);
+    cam.lookAt(world.cameraPin.look);
+    return;
+  }
+  if (world.phase === 'title') {
+    world.titleT += dt;
+    const a = 2.2 + world.titleT * ((Math.PI * 2) / 126);
+    cam.position.set(Math.sin(a) * 130, 72, Math.cos(a) * 130);
     cam.lookAt(0, 10, 0);
     return;
   }
-  state.camYaw += state.input.mouseDX * 0.0032;
-  state.camPitch = clamp(state.camPitch + state.input.mouseDY * 0.0022, -0.15, 0.9);
-  if (p.inCar) {
-    const targetYaw = p.inCar.angle + state.input.mouseDX * 0; // mouse nudges handled below
-    let diff = angleDiff(state.camYaw, p.inCar.angle);
-    state.camYaw -= diff * Math.min(1, dt * 2.2) * (1 - 0.12);
-    state.camYaw += state.input.mouseDX * 0.0032 * 0.12;
-    void targetYaw;
+  const p = world.player;
+  const driving = !!p.inCar;
+  if (driving) {
+    world.camYaw = angleDamp(world.camYaw, p.inCar.angle + world.driveCamOffset, 3.5, dt);
+    world.driveCamOffset = damp(world.driveCamOffset, 0, 1.5, dt);
   }
-  const dist = p.inCar ? 9.5 : 7.5;
-  const height = (p.inCar ? 4.2 : 3.4) + state.camPitch * 4;
-  const fx = -Math.sin(state.camYaw);
-  const fz = -Math.cos(state.camYaw);
-  const anchorX = p.inCar ? p.inCar.x : p.x;
-  const anchorZ = p.inCar ? p.inCar.z : p.z;
-  const wantX = anchorX - fx * dist;
-  const wantZ = anchorZ - fz * dist;
-  const wantY = height;
-  const k = 1 - Math.exp(-7 * dt);
-  if (!state.camInit) {
-    cam.position.set(wantX, wantY, wantZ);
-    state.camInit = true;
+  const dist = driving ? 9.5 : 7.5;
+  const height = (driving ? 4.2 : 3.4) + world.camPitch * 4;
+  const fx = -Math.sin(world.camYaw);
+  const fz = -Math.cos(world.camYaw);
+  const tx = driving ? p.inCar.x : p.x;
+  const tz = driving ? p.inCar.z : p.z;
+  const desired = new THREE.Vector3(tx - fx * dist, height, tz - fz * dist);
+  const lookDist = driving ? 8 : 4;
+  const look = new THREE.Vector3(tx + fx * lookDist, 1.7, tz + fz * lookDist);
+  if (world.camSnap || !world.camPos) {
+    world.camPos = desired.clone();
+    world.camLook = look.clone();
+    world.camSnap = false;
   } else {
-    cam.position.x += (wantX - cam.position.x) * k;
-    cam.position.y += (wantY - cam.position.y) * k;
-    cam.position.z += (wantZ - cam.position.z) * k;
+    const k = 1 - Math.exp(-7 * dt);
+    world.camPos.lerp(desired, k);
+    world.camLook.lerp(look, k);
   }
-  if (state.camShake > 0) {
-    state.camShake = Math.max(0, state.camShake - 1.8 * dt);
-    cam.position.x += (state.rng.next() - 0.5) * state.camShake;
-    cam.position.y += (state.rng.next() - 0.5) * state.camShake * 0.6;
+  cam.position.copy(world.camPos);
+  if (world.shake > 0.003) {
+    cam.position.x += world.rng.range(-1, 1) * world.shake * 0.35;
+    cam.position.y += world.rng.range(-1, 1) * world.shake * 0.25;
   }
-  const lookAhead = p.inCar ? 8 : 4;
-  cam.lookAt(anchorX + fx * lookAhead, 1.7, anchorZ + fz * lookAhead);
+  cam.lookAt(world.camLook);
 }

@@ -1,156 +1,191 @@
-// missions.js — the three-mission story chain: beacons, objectives, rewards and Viper ambushes.
+// missions.js — the chained three-mission story: PACKAGE RUN, HEAT ESCAPE
+// and HARBOR SHOWDOWN. Steps are goto / escape / fight; a pulsing beacon
+// marks goto targets, completion pays out, banners announce, and the next
+// mission starts immediately.
+
 import * as THREE from 'three';
-import { MISSIONS, PALETTE } from './config.js';
-import { dist2D } from './random.js';
+import { MISSIONS } from './config.js';
 import { spawnEnemy } from './combat.js';
+import { showBanner, showMessage } from './hud.js';
+import { writeSave } from './save.js';
+import { playMissionComplete } from './audio.js';
 
-export function createMissions(state) {
-  state.missions = {
-    index: 0, step: 0, active: false, beacon: null, beaconRing: null,
-    bannerTimer: 0, bannerText: '', fightSpawned: false,
+export function createMissions(world) {
+  return {
+    index: 0,
+    step: 0,
+    active: null,
+    beacon: null,
+    beaconRing: null,
+    target: null,
+    enemies: [],
+    started: false,
   };
-  return state.missions;
 }
 
-export function placeMissionBeacon(state, x, z) {
-  removeMissionBeacon(state);
-  const geo = new THREE.CylinderGeometry(1.6, 1.6, 60, 12, 1, true);
-  const mat = new THREE.MeshBasicMaterial({
-    color: PALETTE.beacon, transparent: true, opacity: 0.35,
-    side: THREE.DoubleSide, depthWrite: false,
-  });
-  const beacon = new THREE.Mesh(geo, mat);
-  beacon.position.set(x, 30, z);
-  state.render.scene.add(beacon);
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(2.6, 3.2, 24),
-    new THREE.MeshBasicMaterial({ color: PALETTE.beacon, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false })
-  );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.set(x, 0.06, z);
-  state.render.scene.add(ring);
-  state.missions.beacon = beacon;
-  state.missions.beaconRing = ring;
-}
-
-export function removeMissionBeacon(state) {
-  const m = state.missions;
-  if (m.beacon) {
-    state.render.scene.remove(m.beacon);
-    m.beacon = null;
+export function placeMissionBeacon(world, x, z) {
+  const m = world.missions;
+  if (!m.beacon) {
+    const group = new THREE.Group();
+    const column = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.6, 1.6, 60, 14, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xffd83d, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false })
+    );
+    column.position.y = 30;
+    group.add(column);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(2.6, 3.4, 28),
+      new THREE.MeshBasicMaterial({ color: 0xffd83d, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.06;
+    group.add(ring);
+    m.beacon = group;
+    m.beaconRing = ring;
+    world.render.scene.add(group);
   }
-  if (m.beaconRing) {
-    state.render.scene.remove(m.beaconRing);
-    m.beaconRing = null;
-  }
+  m.beacon.position.set(x, 0, z);
+  m.beacon.visible = true;
 }
 
-export function currentObjective(state) {
-  const m = state.missions;
-  if (!m.active) return '';
-  const mission = MISSIONS[m.index];
-  if (!mission) return 'Free roam — Solmar Bay is yours';
-  const step = mission.steps[m.step];
-  if (!step) return '';
-  return mission.name + ': ' + step.text;
+export function removeMissionBeacon(world) {
+  const m = world.missions;
+  if (m.beacon) m.beacon.visible = false;
+  m.target = null;
 }
 
-export function missionTargetPos(state) {
-  const m = state.missions;
+export function currentObjective(world) {
+  const m = world.missions;
+  if (!m.active) return 'Free roam — Rico Vale owns Solmar Bay.';
+  const step = m.active.steps[m.step];
+  return step ? `${m.active.name}: ${step.label}` : m.active.name;
+}
+
+export function missionTargetPos(world) {
+  const m = world.missions;
   if (!m.active) return null;
-  const mission = MISSIONS[m.index];
-  if (!mission) return null;
-  const step = mission.steps[m.step];
-  if (!step || step.kind === 'escape') return null;
-  return { x: step.x, z: step.z };
+  const step = m.active.steps[m.step];
+  if (!step) return null;
+  if (step.kind === 'goto' || step.kind === 'fight') return { x: step.x, z: step.z };
+  return null;
 }
 
-export function startMission(state, index) {
-  const m = state.missions;
-  m.index = index;
+export function startMission(world, idx) {
+  const m = world.missions;
+  m.index = idx;
   m.step = 0;
-  m.fightSpawned = false;
-  const mission = MISSIONS[index];
-  if (!mission) {
-    m.active = false;
-    removeMissionBeacon(state);
-    state.showBanner('STORY COMPLETE — Rico Vale owns Solmar Bay. Free roam!', 6);
+  m.enemies = [];
+  m.active = MISSIONS[idx] || null;
+  m.started = true;
+  if (!m.active) {
+    removeMissionBeacon(world);
+    world.objectiveText = currentObjective(world);
     return;
   }
-  m.active = true;
-  state.showBanner(mission.name + ' — ' + mission.intro, 5);
-  if (mission.name === 'HEAT ESCAPE') {
-    state.wanted.level = Math.max(state.wanted.level, 3);
-    state.wanted.heat = 0;
+  if (idx === 1) {
+    // HEAT ESCAPE opens under full police attention.
+    world.wanted.level = 3;
+    world.wanted.heat = 0;
   }
-  const step = mission.steps[0];
-  if (step.kind === 'goto') placeMissionBeacon(state, step.x, step.z);
+  showBanner(world, m.active.name, 5);
+  showMessage(world, m.active.story, 4);
+  applyStep(world);
+  world.objectiveText = currentObjective(world);
 }
 
-export function spawnMissionEnemies(state) {
-  const spots = [[-8, -6], [7, -9], [2, 8]];
-  const out = [];
-  for (const [ox, oz] of spots) {
-    out.push(spawnEnemy(state, 150 + ox, -150 + oz));
-  }
-  return out;
-}
-
-export function completeMission(state) {
-  const m = state.missions;
-  const mission = MISSIONS[m.index];
-  if (!mission) return;
-  state.money += mission.reward;
-  state.xp += mission.xp;
-  state.save.missionsDone = Math.max(state.save.missionsDone, m.index + 1);
-  if (state.money > state.save.bestMoney) state.save.bestMoney = state.money;
-  state.showBanner(mission.name + ' COMPLETE +$' + mission.reward + ' +' + mission.xp + ' XP', 5);
-  if (state.audio) state.audioMissionComplete = true;
-  state.persistSave();
-  startMission(state, m.index + 1);
-}
-
-export function advanceMissionStep(state) {
-  const m = state.missions;
-  const mission = MISSIONS[m.index];
-  if (!mission) return;
-  m.step += 1;
-  m.fightSpawned = false;
-  if (m.step >= mission.steps.length) {
-    removeMissionBeacon(state);
-    completeMission(state);
-    return;
-  }
-  const step = mission.steps[m.step];
-  if (step.kind === 'goto') placeMissionBeacon(state, step.x, step.z);
-  else removeMissionBeacon(state);
-}
-
-export function updateMissions(state, dt) {
-  const m = state.missions;
-  if (m.beaconRing) {
-    const s = 1 + Math.sin(state.elapsed * 3) * 0.12;
-    m.beaconRing.scale.set(s, s, 1);
-    m.beaconRing.material.opacity = 0.28 + Math.sin(state.elapsed * 3) * 0.1;
-  }
-  if (!m.active || state.phase !== 'play') return;
-  const mission = MISSIONS[m.index];
-  if (!mission) return;
-  const step = mission.steps[m.step];
+// Set up whatever the current step needs: a beacon for goto, enemies for a
+// fight, nothing for an escape.
+function applyStep(world) {
+  const m = world.missions;
+  const step = m.active?.steps[m.step];
   if (!step) return;
-  const p = state.player;
-  const px = p.inCar ? p.inCar.x : p.x;
-  const pz = p.inCar ? p.inCar.z : p.z;
   if (step.kind === 'goto') {
-    if (dist2D(px, pz, step.x, step.z) < step.radius) advanceMissionStep(state);
-  } else if (step.kind === 'escape') {
-    if (state.wanted.level <= 0) advanceMissionStep(state);
+    placeMissionBeacon(world, step.x, step.z);
+    m.target = { x: step.x, z: step.z };
   } else if (step.kind === 'fight') {
-    if (!m.fightSpawned) {
-      m.fightSpawned = true;
-      spawnMissionEnemies(state);
-    }
-    const alive = state.enemies.filter((e) => !e.dead).length;
-    if (alive === 0 && m.fightSpawned) advanceMissionStep(state);
+    removeMissionBeacon(world);
+    m.target = { x: step.x, z: step.z };
+    spawnMissionEnemies(world);
+  } else {
+    removeMissionBeacon(world);
   }
+}
+
+export function spawnMissionEnemies(world) {
+  const m = world.missions;
+  const step = m.active?.steps[m.step];
+  const cx = step?.x ?? 150;
+  const cz = step?.z ?? -150;
+  const offsets = [
+    [-8, -6],
+    [7, -9],
+    [2, 8],
+  ];
+  m.enemies = offsets.map(([dx, dz]) => spawnEnemy(world, cx + dx, cz + dz));
+  return m.enemies;
+}
+
+export function advanceMissionStep(world) {
+  const m = world.missions;
+  if (!m.active) return;
+  m.step++;
+  if (m.step >= m.active.steps.length) {
+    completeMission(world);
+    return;
+  }
+  applyStep(world);
+  world.objectiveText = currentObjective(world);
+  const step = m.active.steps[m.step];
+  showMessage(world, step.label, 3.5);
+}
+
+export function completeMission(world) {
+  const m = world.missions;
+  const done = m.active;
+  if (!done) return;
+  world.money += done.reward;
+  world.xp += done.xp;
+  world.missionsDone = m.index + 1;
+  removeMissionBeacon(world);
+  playMissionComplete(world);
+  writeSave(world);
+  const next = m.index + 1;
+  if (next < MISSIONS.length) {
+    showBanner(world, `${done.name} COMPLETE +$${done.reward} +${done.xp} XP`, 5);
+    startMission(world, next);
+    // Keep the reward banner up over the new mission's intro banner.
+    showBanner(world, `${done.name} COMPLETE +$${done.reward} +${done.xp} XP`, 5);
+  } else {
+    m.active = null;
+    showBanner(world, 'STORY COMPLETE — Rico Vale owns Solmar Bay. Free roam!', 6);
+    world.objectiveText = currentObjective(world);
+  }
+}
+
+export function updateMissions(world, dt) {
+  const m = world.missions;
+  if (!m.active) return;
+  if (m.beacon && m.beacon.visible && m.beaconRing) {
+    const pulse = 1 + Math.sin(world.elapsed * 3) * 0.12;
+    m.beaconRing.scale.set(pulse, pulse, 1);
+    m.beaconRing.material.opacity = 0.28 + Math.sin(world.elapsed * 3) * 0.1;
+  }
+  const step = m.active.steps[m.step];
+  if (!step) return;
+  const p = world.player;
+  if (step.kind === 'goto') {
+    if (Math.hypot(p.x - step.x, p.z - step.z) < step.radius) {
+      advanceMissionStep(world);
+    }
+  } else if (step.kind === 'escape') {
+    if (world.wanted.level <= 0) {
+      advanceMissionStep(world);
+    }
+  } else if (step.kind === 'fight') {
+    if (m.enemies.length > 0 && m.enemies.every((e) => e.dead)) {
+      m.enemies = [];
+      advanceMissionStep(world);
+    }
+  }
+  world.objectiveText = currentObjective(world);
 }

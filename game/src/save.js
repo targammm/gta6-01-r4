@@ -1,41 +1,54 @@
-// save.js — localStorage persistence for money, XP, mission progress and play time.
+// save.js — the localStorage save: money, XP, missions done, best money and
+// total play time, under one versioned key.
+
 import { SAVE_KEY, createDefaultSave } from './config.js';
+
+export function hasSaveData() {
+  try {
+    return !!localStorage.getItem(SAVE_KEY);
+  } catch {
+    return false;
+  }
+}
 
 export function loadSave() {
   try {
-    const raw = globalThis.localStorage ? globalThis.localStorage.getItem(SAVE_KEY) : null;
+    const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return createDefaultSave();
-    const parsed = JSON.parse(raw);
-    const base = createDefaultSave();
-    for (const key of Object.keys(base)) {
-      if (typeof parsed[key] === 'number' && Number.isFinite(parsed[key])) base[key] = parsed[key];
-    }
-    return base;
-  } catch (err) {
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return createDefaultSave();
+    return { ...createDefaultSave(), ...data };
+  } catch {
     return createDefaultSave();
   }
 }
 
-export function writeSave(save) {
+export function writeSave(world) {
+  if (!world.save) world.save = createDefaultSave();
+  world.save.money = world.money;
+  world.save.xp = world.xp;
+  world.save.missionsDone = world.missionsDone;
+  world.save.bestMoney = Math.max(world.save.bestMoney || 0, world.money);
+  world.save.playTime = Math.round(world.playTime || 0);
   try {
-    if (globalThis.localStorage) globalThis.localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-  } catch (err) {
-    // storage can be unavailable (private mode); the game simply runs unsaved
+    localStorage.setItem(SAVE_KEY, JSON.stringify(world.save));
+    world.hasSave = true;
+  } catch {
+    // Storage can be unavailable (private mode); the game simply plays on.
   }
 }
 
 export function clearSave() {
   try {
-    if (globalThis.localStorage) globalThis.localStorage.removeItem(SAVE_KEY);
-  } catch (err) {
-    // nothing to clear when storage is unavailable
+    localStorage.removeItem(SAVE_KEY);
+  } catch {
+    // Nothing to clear.
   }
 }
 
-export function applySaveToState(save, state) {
-  state.money = save.money;
-  state.xp = save.xp;
-  state.save = save;
-  if (save.money > save.bestMoney) save.bestMoney = save.money;
-  return state;
+export function applySaveToState(world) {
+  world.money = world.save.money || 0;
+  world.xp = world.save.xp || 0;
+  world.missionsDone = world.save.missionsDone || 0;
+  world.playTime = world.save.playTime || 0;
 }

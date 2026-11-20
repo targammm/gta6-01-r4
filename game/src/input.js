@@ -1,94 +1,91 @@
-// input.js — keyboard state, one-shot presses, and mouse look (pointer lock with drag fallback).
-import { clamp } from './random.js';
+// input.js — keyboard and mouse state. Keys are tracked as held and as
+// pressed-this-step; the mouse drives the camera through pointer lock when
+// available and through a plain drag otherwise.
 
-export function createInput(canvas) {
+export function createInput(world) {
   const input = {
     keys: new Set(),
     pressed: new Set(),
-    mouseDX: 0,
-    mouseDY: 0,
     mouseDown: false,
-    clicked: false,
-    locked: false,
-    dragLooking: false,
-    lastX: 0,
-    lastY: 0,
+    mousePressed: false,
+    dragging: false,
+    yawDelta: 0,
+    pitchDelta: 0,
   };
-
-  globalThis.addEventListener('keydown', (ev) => {
-    if (ev.repeat) return;
-    input.keys.add(ev.code);
-    input.pressed.add(ev.code);
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(ev.code)) ev.preventDefault();
+  window.addEventListener('keydown', (e) => {
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+      e.preventDefault();
+    }
+    if (!e.repeat) input.pressed.add(e.code);
+    input.keys.add(e.code);
   });
-  globalThis.addEventListener('keyup', (ev) => {
-    input.keys.delete(ev.code);
-  });
-  globalThis.addEventListener('blur', () => {
-    input.keys.clear();
-  });
-
-  if (canvas) {
-    canvas.addEventListener('mousedown', (ev) => {
+  window.addEventListener('keyup', (e) => input.keys.delete(e.code));
+  window.addEventListener('blur', () => input.keys.clear());
+  window.addEventListener('mousedown', (e) => {
+    if (e.button === 0) {
       input.mouseDown = true;
-      input.clicked = true;
-      input.dragLooking = true;
-      input.lastX = ev.clientX;
-      input.lastY = ev.clientY;
-      if (canvas.requestPointerLock && !input.locked) {
-        try { canvas.requestPointerLock(); } catch (err) { /* drag fallback stays active */ }
-      }
-    });
-    globalThis.addEventListener('mouseup', () => {
+      input.mousePressed = true;
+      input.dragging = true;
+    }
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 0) {
       input.mouseDown = false;
-      input.dragLooking = false;
-    });
-    globalThis.addEventListener('mousemove', (ev) => {
-      if (input.locked) {
-        input.mouseDX += ev.movementX || 0;
-        input.mouseDY += ev.movementY || 0;
-      } else if (input.dragLooking) {
-        input.mouseDX += (ev.clientX - input.lastX) * 1.6;
-        input.mouseDY += (ev.clientY - input.lastY) * 1.6;
-        input.lastX = ev.clientX;
-        input.lastY = ev.clientY;
+      input.dragging = false;
+    }
+  });
+  window.addEventListener('mousemove', (e) => {
+    const canvas = document.getElementById('game');
+    if (document.pointerLockElement === canvas || input.dragging) {
+      input.yawDelta += e.movementX || 0;
+      input.pitchDelta += e.movementY || 0;
+    }
+  });
+  const canvas = document.getElementById('game');
+  if (canvas) {
+    canvas.addEventListener('click', () => {
+      if (world.phase === 'play' && !world.shotMode) {
+        try {
+          canvas.requestPointerLock();
+        } catch {
+          // Pointer lock is a nicety; drag-look still works without it.
+        }
       }
-    });
-    document.addEventListener('pointerlockchange', () => {
-      input.locked = document.pointerLockElement === canvas;
     });
   }
   return input;
 }
 
+// On-foot axes: forward is +1 when W is held, strafe is +1 when D is held.
 export function readMoveAxes(input) {
-  let forward = 0;
-  let strafe = 0;
-  if (input.keys.has('KeyW') || input.keys.has('ArrowUp')) forward += 1;
-  if (input.keys.has('KeyS') || input.keys.has('ArrowDown')) forward -= 1;
-  if (input.keys.has('KeyA') || input.keys.has('ArrowLeft')) strafe -= 1;
-  if (input.keys.has('KeyD') || input.keys.has('ArrowRight')) strafe += 1;
+  const forward =
+    (input.keys.has('KeyW') || input.keys.has('ArrowUp') ? 1 : 0) -
+    (input.keys.has('KeyS') || input.keys.has('ArrowDown') ? 1 : 0);
+  const strafe =
+    (input.keys.has('KeyD') || input.keys.has('ArrowRight') ? 1 : 0) -
+    (input.keys.has('KeyA') || input.keys.has('ArrowLeft') ? 1 : 0);
   return { forward, strafe };
-}
-
-export function driveAxes(input) {
-  let throttle = 0;
-  let steer = 0;
-  if (input.keys.has('KeyW') || input.keys.has('ArrowUp')) throttle += 1;
-  if (input.keys.has('KeyS') || input.keys.has('ArrowDown')) throttle -= 1;
-  if (input.keys.has('KeyA') || input.keys.has('ArrowLeft')) steer += 1;
-  if (input.keys.has('KeyD') || input.keys.has('ArrowRight')) steer -= 1;
-  const brake = input.keys.has('Space');
-  return { throttle, steer: clamp(steer, -1, 1), brake };
 }
 
 export function wasPressed(input, code) {
   return input.pressed.has(code);
 }
 
+// Driving axes: throttle +1 accelerates, -1 brakes/reverses; steer +1 is
+// left (A), -1 is right (D); Space is the handbrake.
+export function driveAxes(input) {
+  const throttle =
+    (input.keys.has('KeyW') || input.keys.has('ArrowUp') ? 1 : 0) -
+    (input.keys.has('KeyS') || input.keys.has('ArrowDown') ? 1 : 0);
+  const steer =
+    (input.keys.has('KeyA') || input.keys.has('ArrowLeft') ? 1 : 0) -
+    (input.keys.has('KeyD') || input.keys.has('ArrowRight') ? 1 : 0);
+  return { throttle, steer, brake: input.keys.has('Space') };
+}
+
 export function endInputStep(input) {
   input.pressed.clear();
-  input.mouseDX = 0;
-  input.mouseDY = 0;
-  input.clicked = false;
+  input.mousePressed = false;
+  input.yawDelta = 0;
+  input.pitchDelta = 0;
 }

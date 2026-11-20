@@ -1,177 +1,203 @@
-// combat.js — pistol fire with a fat muzzle flash, Viper enemy AI, punches and player damage.
+// combat.js — pistol hitscan, Viper enemy AI (approach, strafe, return
+// fire), punching and death handling. Shots are rays from the camera
+// through the crosshair, tested against spheres around each target.
+
 import * as THREE from 'three';
-import { COMBAT, PALETTE, WANTED } from './config.js';
-import { clamp, dist2D, angleDiff } from './random.js';
-import { pointInBuilding } from './city.js';
+import { COMBAT, WANTED } from './config.js';
+import { angleDamp } from './random.js';
 import { burstSparks, muzzleFlash } from './effects.js';
 import { addWanted } from './vehicles.js';
+import { showMessage } from './hud.js';
+import { playGunshot, noiseBurst } from './audio.js';
+import { pointInBuilding } from './city.js';
 
-export function createCombat(state) {
-  state.enemies = [];
-  state.fireCooldown = 0;
-  return state;
+export function createCombat(world) {
+  return { shotsFired: 0 };
 }
 
-export function spawnEnemy(state, x, z) {
-  const group = new THREE.Group();
-  const bodyMat = new THREE.MeshLambertMaterial({ color: PALETTE.viper });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.8, 3, 8), bodyMat);
-  body.position.y = 0.95;
+export function spawnEnemy(world, x, z) {
+  const g = new THREE.Group();
+  const bodyMat = new THREE.MeshLambertMaterial({ color: 0x14161c });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.66, 4, 10), bodyMat);
+  body.position.y = 1.05;
   body.castShadow = true;
-  group.add(body);
-  const band = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.16, 0.72),
-    new THREE.MeshLambertMaterial({ color: PALETTE.viperBand }));
-  band.position.y = 1.15;
-  group.add(band);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 8, 8),
-    new THREE.MeshLambertMaterial({ color: 0xd9a066 }));
-  head.position.y = 1.74;
-  group.add(head);
-  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.14, 0.42),
-    new THREE.MeshLambertMaterial({ color: 0x0c0d10 }));
-  gun.position.set(0.3, 1.05, -0.35);
-  group.add(gun);
-  group.position.set(x, 0, z);
-  state.render.scene.add(group);
+  g.add(body);
+  // The Vipers' red chest band.
+  const band = new THREE.Mesh(
+    new THREE.BoxGeometry(0.56, 0.18, 0.56),
+    new THREE.MeshLambertMaterial({ color: 0xd21f2c })
+  );
+  band.position.y = 1.28;
+  g.add(band);
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.24, 10, 8),
+    new THREE.MeshLambertMaterial({ color: 0xc98d64 })
+  );
+  head.position.y = 1.82;
+  g.add(head);
+  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.14, 0.42), bodyMat);
+  gun.position.set(0.42, 1.15, -0.3);
+  g.add(gun);
+  g.position.set(x, 0, z);
+  world.render.scene.add(g);
   const enemy = {
-    mesh: group, x, z, angle: 0, health: COMBAT.enemyHealth,
-    fireTimer: state.rng.range(0.8, 1.8), strafeDir: state.rng.chance(0.5) ? 1 : -1,
-    dead: false, muzzle: { x: 0, y: 1.05, z: 0 },
+    x,
+    z,
+    health: COMBAT.enemyHealth,
+    dead: false,
+    mesh: g,
+    angle: 0,
+    fireTimer: world.rng.range(0.6, 1.4),
+    strafeDir: world.rng.chance(0.5) ? 1 : -1,
+    strafeTimer: world.rng.range(1, 2),
+    hold: false,
   };
-  state.enemies.push(enemy);
+  world.enemies.push(enemy);
   return enemy;
 }
 
-function sphereHit(ox, oy, oz, dx, dy, dz, cx, cy, cz, radius) {
-  const lx = cx - ox;
-  const ly = cy - oy;
-  const lz = cz - oz;
-  const t = lx * dx + ly * dy + lz * dz;
+// Distance along the ray to a sphere hit, or -1 for a miss.
+export function rayHit(origin, dir, cx, cy, cz, radius) {
+  const ox = cx - origin.x;
+  const oy = cy - origin.y;
+  const oz = cz - origin.z;
+  const t = ox * dir.x + oy * dir.y + oz * dir.z;
   if (t < 0) return -1;
-  const d2 = lx * lx + ly * ly + lz * lz - t * t;
+  const d2 = ox * ox + oy * oy + oz * oz - t * t;
   if (d2 > radius * radius) return -1;
   return t;
 }
 
-export function rayHit(state, origin, dir) {
-  let best = null;
-  let bestT = COMBAT.range;
-  for (const e of state.enemies) {
+const _dir = new THREE.Vector3();
+
+export function playerShoot(world) {
+  const p = world.player;
+  if (world.phase !== 'play' || p.inCar || world.fireCooldown > 0) return;
+  world.fireCooldown = COMBAT.fireRate;
+  world.combat.shotsFired++;
+  const cam = world.render.camera;
+  const origin = cam.position;
+  cam.getWorldDirection(_dir);
+
+  // The player's own flash: big star, hot light.
+  const fx = -Math.sin(p.heading);
+  const fz = -Math.cos(p.heading);
+  muzzleFlash(world, p.x + fx * 0.5, 1.35, p.z + fz * 0.5, 3.0, 130);
+  playGunshot(world);
+  if (world.wanted.level === 0) addWanted(world, WANTED.shoot);
+
+  let bestT = COMBAT.pistolRange;
+  let bestEnemy = null;
+  let bestCar = null;
+  for (const e of world.enemies) {
     if (e.dead) continue;
-    const t = sphereHit(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, e.x, 1.3, e.z, 1.1);
+    const t = rayHit(origin, _dir, e.x, 1.3, e.z, 1.1);
     if (t > 0 && t < bestT) {
       bestT = t;
-      best = { kind: 'enemy', target: e, t };
+      bestEnemy = e;
+      bestCar = null;
     }
   }
-  for (const car of state.allCars()) {
-    const t = sphereHit(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, car.x, 1.0, car.z, 2.2);
+  for (const car of world.cars) {
+    if (car === p.inCar) continue;
+    const t = rayHit(origin, _dir, car.x, 1.0, car.z, 2.2);
     if (t > 0 && t < bestT) {
       bestT = t;
-      best = { kind: 'car', target: car, t };
+      bestCar = car;
+      bestEnemy = null;
     }
   }
-  return best;
-}
-
-export function playerShoot(state) {
-  if (state.fireCooldown > 0 || state.player.inCar) return false;
-  state.fireCooldown = COMBAT.fireRate;
-  const cam = state.render.camera;
-  const origin = cam.position.clone();
-  const dir = new THREE.Vector3();
-  cam.getWorldDirection(dir);
-  const p = state.player;
-  const muzzleX = p.x - Math.sin(p.heading) * 0.55;
-  const muzzleZ = p.z - Math.cos(p.heading) * 0.55;
-  muzzleFlash(state.effects, state.rng, muzzleX, 1.25, muzzleZ, true);
-  if (state.audio) state.audioGunshot = true;
-  if (state.wanted.level < 1) addWanted(state, WANTED.gains.shoot);
-  else state.wanted.heat = 0;
-  const hit = rayHit(state, origin, dir);
-  if (hit && hit.kind === 'enemy') {
-    const e = hit.target;
-    e.health -= COMBAT.damage;
-    burstSparks(state.effects, state.rng, e.x, 1.3, e.z, 10);
-    if (e.health <= 0) killEnemy(state, e);
-  } else if (hit && hit.kind === 'car') {
-    hit.target.speed *= 0.4;
-    burstSparks(state.effects, state.rng, hit.target.x, 1, hit.target.z, 6);
+  if (bestEnemy) {
+    bestEnemy.health -= COMBAT.pistolDamage;
+    burstSparks(world, bestEnemy.x, 1.3, bestEnemy.z, 10, 7);
+    if (bestEnemy.health <= 0) killEnemy(world, bestEnemy);
+  } else if (bestCar) {
+    bestCar.speed *= 0.4;
+    burstSparks(world, bestCar.x, 1, bestCar.z, 6, 6);
+    if (bestCar.isPolice) world.wanted.heat = 0;
   }
-  return true;
 }
 
-export function killEnemy(state, enemy) {
+export function killEnemy(world, enemy) {
   if (enemy.dead) return;
   enemy.dead = true;
-  enemy.mesh.rotation.x = Math.PI / 2;
-  enemy.mesh.position.y = 0.3;
-  burstSparks(state.effects, state.rng, enemy.x, 1, enemy.z, 16);
-  state.xp += COMBAT.killXp;
-  state.showMessage('Viper down! +25 XP', 3);
-  addWanted(state, WANTED.gains.kill);
+  enemy.health = 0;
+  world.render.scene.remove(enemy.mesh);
+  burstSparks(world, enemy.x, 1.2, enemy.z, 16, 10);
+  world.xp += COMBAT.killXp;
+  addWanted(world, WANTED.kill);
+  showMessage(world, 'Viper down! +25 XP');
 }
 
-export function updateEnemies(state, dt) {
-  const p = state.player;
-  state.fireCooldown = Math.max(0, state.fireCooldown - dt);
-  for (const e of state.enemies) {
+export function playerPunch(world) {
+  const p = world.player;
+  if (world.phase !== 'play' || p.inCar || world.punchCooldown > 0) return;
+  world.punchCooldown = 0.35;
+  noiseBurst(world, 0.06, 900, 0.15);
+  let best = null;
+  let bestD = 2.4;
+  for (const e of world.enemies) {
     if (e.dead) continue;
-    const d = dist2D(e.x, e.z, p.x, p.z);
-    const desired = Math.atan2(-(p.x - e.x), -(p.z - e.z));
-    e.angle += clamp(angleDiff(e.angle, desired), -3 * dt, 3 * dt);
-    if (d > 10) {
-      e.x += -Math.sin(e.angle) * COMBAT.enemySpeed * dt;
-      e.z += -Math.cos(e.angle) * COMBAT.enemySpeed * dt;
-    } else {
-      const sx = -Math.cos(e.angle) * e.strafeDir;
-      const sz = Math.sin(e.angle) * e.strafeDir;
-      e.x += sx * COMBAT.enemyStrafe * dt;
-      e.z += sz * COMBAT.enemyStrafe * dt;
-      if (state.rng.chance(0.005)) e.strafeDir *= -1;
+    const d = Math.hypot(e.x - p.x, e.z - p.z);
+    if (d < bestD) {
+      bestD = d;
+      best = e;
     }
-    if (pointInBuilding(state.city, e.x, e.z, 0.5)) {
-      e.x -= -Math.sin(e.angle) * 1.5;
-      e.z -= -Math.cos(e.angle) * 1.5;
-    }
-    e.mesh.position.set(e.x, 0, e.z);
-    e.mesh.rotation.y = e.angle;
-    e.fireTimer -= dt;
-    if (d < COMBAT.enemyRange && e.fireTimer <= 0 && state.phase === 'play') {
-      e.fireTimer = COMBAT.enemyFireRate * state.rng.range(0.8, 1.5);
-      const mx = e.x - Math.sin(e.angle) * 0.55;
-      const mz = e.z - Math.cos(e.angle) * 0.55;
-      muzzleFlash(state.effects, state.rng, mx, 1.15, mz, false);
-      if (state.audio) state.audioGunshot = true;
-      if (state.rng.chance(0.45) && !p.inCar) {
-        p.health -= COMBAT.enemyDamage;
-        if (p.health <= 0) {
-          p.health = 0;
-          state.phase = 'dead';
+  }
+  if (best) {
+    best.health -= 12;
+    burstSparks(world, best.x, 1.3, best.z, 4, 5);
+    if (best.health <= 0) killEnemy(world, best);
+  }
+}
+
+export function updateEnemies(world, dt) {
+  const p = world.player;
+  for (const e of world.enemies) {
+    if (e.dead) continue;
+    const dx = p.x - e.x;
+    const dz = p.z - e.z;
+    const dist = Math.hypot(dx, dz);
+    const targetAngle = Math.atan2(-dx, -dz);
+    e.angle = angleDamp(e.angle, targetAngle, 3, dt);
+
+    if (!e.hold && dist > 0.01) {
+      let mx = 0;
+      let mz = 0;
+      if (dist > 10) {
+        mx = (dx / dist) * COMBAT.enemySpeed;
+        mz = (dz / dist) * COMBAT.enemySpeed;
+      } else {
+        e.strafeTimer -= dt;
+        if (e.strafeTimer <= 0) {
+          e.strafeDir *= -1;
+          e.strafeTimer = world.rng.range(1, 2);
         }
-      } else if (state.rng.chance(0.3) && p.inCar) {
-        p.health -= 3;
-        if (p.health <= 0) {
-          p.health = 0;
-          state.phase = 'dead';
-        }
+        mx = (-dz / dist) * 1.6 * e.strafeDir;
+        mz = (dx / dist) * 1.6 * e.strafeDir;
+      }
+      const nx = e.x + mx * dt;
+      const nz = e.z + mz * dt;
+      if (!pointInBuilding(world.city, nx, nz, 0.5)) {
+        e.x = nx;
+        e.z = nz;
       }
     }
-  }
-}
 
-export function playerPunch(state) {
-  const p = state.player;
-  if (p.inCar) return false;
-  let hitAny = false;
-  for (const e of state.enemies) {
-    if (e.dead) continue;
-    if (dist2D(p.x, p.z, e.x, e.z) < 2.4) {
-      e.health -= 12;
-      burstSparks(state.effects, state.rng, e.x, 1.2, e.z, 5);
-      hitAny = true;
-      if (e.health <= 0) killEnemy(state, e);
+    e.fireTimer -= dt;
+    if (dist < COMBAT.enemyRange && e.fireTimer <= 0) {
+      e.fireTimer = COMBAT.enemyFireRate * world.rng.range(0.8, 1.5);
+      const fx = -Math.sin(e.angle);
+      const fz = -Math.cos(e.angle);
+      muzzleFlash(world, e.x + fx * 0.5, 1.3, e.z + fz * 0.5, 1.8, 65);
+      playGunshot(world);
+      if (world.rng.chance(0.45)) {
+        p.health = Math.max(0, p.health - COMBAT.enemyDamage);
+        world.shake = Math.max(world.shake, 0.12);
+      }
     }
+
+    e.mesh.position.set(e.x, 0, e.z);
+    e.mesh.rotation.y = e.angle;
   }
-  return hitAny;
 }

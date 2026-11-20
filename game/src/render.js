@@ -1,11 +1,15 @@
-// render.js — three.js renderer, warm coastal lighting, sky dome, sun disc and drifting clouds.
+// render.js — the three.js renderer, warm late-afternoon lighting, fog, a
+// sun disc and a few flat clouds. The city itself is built by city.js.
+
 import * as THREE from 'three';
 import { PALETTE } from './config.js';
+import { createSeededRandom } from './random.js';
 
-export function createRender(canvas) {
+export function createRender(world) {
+  const canvas = document.getElementById('game');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
-  renderer.setSize(globalThis.innerWidth, globalThis.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -13,12 +17,13 @@ export function createRender(canvas) {
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(PALETTE.sky);
-  scene.fog = new THREE.Fog(0xffd9a3, 120, 420);
+  scene.fog = new THREE.Fog(PALETTE.fog, 120, 420);
 
-  const camera = new THREE.PerspectiveCamera(62, globalThis.innerWidth / globalThis.innerHeight, 0.1, 900);
+  const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 900);
   camera.position.set(0, 72, 130);
+  camera.lookAt(0, 10, 0);
 
-  const sun = new THREE.DirectionalLight(0xfff2cf, 2.6);
+  const sun = new THREE.DirectionalLight(PALETTE.sun, 2.6);
   sun.position.set(120, 140, 60);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -26,60 +31,56 @@ export function createRender(canvas) {
   sun.shadow.camera.right = 160;
   sun.shadow.camera.top = 160;
   sun.shadow.camera.bottom = -160;
+  sun.shadow.camera.near = 10;
   sun.shadow.camera.far = 500;
   sun.shadow.bias = -0.0006;
   scene.add(sun);
   scene.add(sun.target);
 
-  const hemi = new THREE.HemisphereLight(0xbfe3ff, 0x8a7f6a, 0.9);
+  const hemi = new THREE.HemisphereLight(0xbcd8ff, 0x8a6f4d, 0.9);
   scene.add(hemi);
-  const fill = new THREE.DirectionalLight(0xffd9b0, 0.35);
+
+  const fill = new THREE.DirectionalLight(0xffd9a8, 0.35);
   fill.position.set(-80, 40, -100);
   scene.add(fill);
 
-  const sunDisc = new THREE.Mesh(
-    new THREE.CircleGeometry(18, 24),
-    new THREE.MeshBasicMaterial({ color: 0xfff6d8, fog: false })
+  // Sun disc and a scatter of flat clouds, placed from a fixed offset seed
+  // so every world looks the same.
+  const rng = createSeededRandom((world.seed || 1) + 777);
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(18, 40),
+    new THREE.MeshBasicMaterial({ color: 0xfff3cf, fog: false })
   );
-  sunDisc.position.set(180, 150, -260);
-  sunDisc.lookAt(0, 40, 0);
-  scene.add(sunDisc);
+  disc.position.set(180, 150, -260);
+  disc.lookAt(0, 40, 0);
+  scene.add(disc);
 
-  const clouds = new THREE.Group();
-  const cloudMat = new THREE.MeshBasicMaterial({ color: 0xfff4e0, transparent: true, opacity: 0.85, fog: false });
+  const cloudMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.92, fog: false });
+  const puffGeo = new THREE.SphereGeometry(1, 10, 8);
   for (let i = 0; i < 10; i++) {
     const cloud = new THREE.Group();
-    const cx = -260 + (i % 5) * 120 + (i * 37) % 40;
-    const cz = -220 + Math.floor(i / 5) * 190 + (i * 53) % 60;
-    const cy = 95 + (i * 29) % 28;
+    const cx = rng.range(-260, 260);
+    const cz = rng.range(-260, 260);
+    const cy = rng.range(95, 123);
     for (let j = 0; j < 3; j++) {
-      const puff = new THREE.Mesh(new THREE.SphereGeometry(9 + (j * 5) % 8, 10, 8), cloudMat);
-      puff.position.set(j * 11 - 11, (j % 2) * 2, (j * 7) % 6);
-      puff.scale.y = 0.38;
+      const puff = new THREE.Mesh(puffGeo, cloudMat);
+      puff.position.set(rng.range(-9, 9), rng.range(-1.5, 1.5), rng.range(-4, 4));
+      puff.scale.set(rng.range(9, 16), rng.range(2.2, 3.4), rng.range(5, 8));
       cloud.add(puff);
     }
     cloud.position.set(cx, cy, cz);
-    clouds.add(cloud);
+    scene.add(cloud);
   }
-  scene.add(clouds);
 
-  globalThis.addEventListener('resize', () => {
-    camera.aspect = globalThis.innerWidth / globalThis.innerHeight;
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(globalThis.innerWidth, globalThis.innerHeight);
+    renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  return { renderer, scene, camera, sun, clouds };
+  return { renderer, scene, camera, sun };
 }
 
-export function renderFrame(render) {
-  render.renderer.render(render.scene, render.camera);
-}
-
-export function handleResize(render, canvas) {
-  const w = canvas.clientWidth || globalThis.innerWidth || 1280;
-  const h = canvas.clientHeight || globalThis.innerHeight || 720;
-  render.camera.aspect = w / h;
-  render.camera.updateProjectionMatrix();
-  render.renderer.setSize(w, h, false);
+export function renderFrame(world) {
+  world.render.renderer.render(world.render.scene, world.render.camera);
 }

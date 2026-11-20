@@ -1,44 +1,48 @@
-// main.js — boot: build the world, wire the fixed-step loop, handle shot mode.
-import { createWorld, stepWorld, startGame } from './world.js';
-import { renderFrame, handleResize } from './render.js';
-import { updateHud } from './hud.js';
+// main.js — boot: build the world from the seed, then either stage one
+// deterministic screenshot (?shot=chase|city|mission|title&seed=N) or run
+// the live game on a fixed-step accumulator.
+
+import { createWorld, stepWorld } from './world.js';
 import { applyShotStaging } from './shots.js';
+import { renderFrame } from './render.js';
+import { updateHud } from './hud.js';
+import { WORLD } from './config.js';
 
-const params = new URLSearchParams(globalThis.location.search);
-const seed = Number(params.get('seed') || '20261120');
-const shotName = params.get('shot');
+function readBootParams() {
+  const params = new URLSearchParams(window.location.search);
+  const seedParam = parseInt(params.get('seed') || '', 10);
+  return {
+    seed: Number.isFinite(seedParam) ? seedParam : 20261120,
+    shot: params.get('shot'),
+  };
+}
 
-const canvas = document.getElementById('game-canvas');
-const hudRoot = document.getElementById('hud');
-const state = createWorld(canvas, hudRoot, seed);
-globalThis.__solmar = state;
+const { seed, shot } = readBootParams();
+const world = createWorld(seed);
+window.__solmar = world;
 
-if (shotName) {
-  state.shotMode = true;
-  applyShotStaging(state, shotName, stepWorld);
-  // One HUD + render pass so the captured frame shows final values.
-  updateHud(state);
-  renderFrame(state.render);
-  globalThis.__shotReady = true;
+if (shot) {
+  applyShotStaging(world, shot);
+  updateHud(world, 0);
+  renderFrame(world);
+  window.__shotReady = true;
 } else {
   let last = performance.now();
-  let accumulator = 0;
-  const STEP = 1 / 60;
-  function frame(now) {
-    requestAnimationFrame(frame);
-    let delta = (now - last) / 1000;
+  let acc = 0;
+  const frame = (now) => {
+    let dt = (now - last) / 1000;
     last = now;
-    if (delta > 0.25) delta = 0.25;
-    accumulator += delta;
-    if (state.phase === 'title' && state.input.pressed.has('Enter')) {
-      startGame(state);
+    if (dt > 0.25) dt = 0.25;
+    acc += dt;
+    let steps = 0;
+    while (acc >= WORLD.step && steps < 5) {
+      stepWorld(world, WORLD.step);
+      acc -= WORLD.step;
+      steps++;
     }
-    while (accumulator >= STEP) {
-      stepWorld(state, STEP);
-      accumulator -= STEP;
-    }
-    renderFrame(state.render);
-  }
-  globalThis.addEventListener('resize', () => handleResize(state.render, canvas));
+    if (steps === 5) acc = 0; // slow device: drop the backlog, stay smooth
+    renderFrame(world);
+    requestAnimationFrame(frame);
+  };
   requestAnimationFrame(frame);
 }
