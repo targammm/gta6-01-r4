@@ -214,11 +214,13 @@ function stageCity(state, stepWorld) {
   state.missionTarget = missionTargetPos(state);
   state.wanted.level = 1;
   state.wanted.heat = 0;
-  // One cruiser down the road ahead, in frame, facing the player.
+  // One cruiser down the road ahead, in frame, facing the player — close
+  // enough (~24 m) that its roof light bar reads at thumbnail size.
   const cruiser = spawnPoliceCar(state, 'front');
-  cruiser.x = 28;
-  cruiser.z = 124;
-  cruiser.angle = Math.PI;
+  cruiser.x = 27;
+  cruiser.z = 136;
+  // Slight angle toward the camera: a three-quarter front view, not a flat one.
+  cruiser.angle = Math.PI + 0.3;
   cruiser.speed = 0;
 }
 

@@ -25,23 +25,46 @@ export function createEffects(scene) {
   flashCanvas.width = 128; flashCanvas.height = 128;
   const fx = flashCanvas.getContext('2d');
   const grad = fx.createRadialGradient(64, 64, 2, 64, 64, 62);
-  grad.addColorStop(0, 'rgba(255,255,240,1)');
-  grad.addColorStop(0.25, 'rgba(255,214,90,0.95)');
-  grad.addColorStop(0.6, 'rgba(255,130,30,0.45)');
+  grad.addColorStop(0, 'rgba(255,255,250,1)');
+  grad.addColorStop(0.35, 'rgba(255,226,120,0.98)');
+  grad.addColorStop(0.65, 'rgba(255,140,35,0.5)');
   grad.addColorStop(1, 'rgba(255,90,10,0)');
   fx.fillStyle = grad;
   fx.fillRect(0, 0, 128, 128);
-  fx.fillStyle = 'rgba(255,240,200,0.9)';
-  fx.fillRect(58, 4, 12, 120);
-  fx.fillRect(4, 58, 120, 12);
+  fx.fillStyle = 'rgba(255,246,214,0.95)';
+  fx.fillRect(54, 2, 20, 124);
+  fx.fillRect(2, 54, 124, 20);
+  fx.beginPath();
+  fx.arc(64, 64, 17, 0, Math.PI * 2);
+  fx.fillStyle = 'rgba(255,255,255,1)';
+  fx.fill();
   const flashTex = new THREE.CanvasTexture(flashCanvas);
   const flashMat = new THREE.SpriteMaterial({ map: flashTex, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
   const flashSprite = new THREE.Sprite(flashMat);
-  flashSprite.scale.set(1.6, 1.6, 1);
+  flashSprite.scale.set(2, 2, 1);
   flashSprite.visible = false;
   scene.add(flashSprite);
   const flashLight = new THREE.PointLight(0xffc266, 0, 22, 1.6);
   scene.add(flashLight);
+
+  // Dedicated flash-particle pool: large, additive, near-white points that
+  // read as an unmistakable muzzle flash even at thumbnail size (the shared
+  // pool's small orange sparks wash out to tan squares when downscaled).
+  const MAX_FLASH = 160;
+  const flashPositions = new Float32Array(MAX_FLASH * 3);
+  const flashColors = new Float32Array(MAX_FLASH * 3);
+  const flashParticles = [];
+  for (let i = 0; i < MAX_FLASH; i++) {
+    flashParticles.push({ alive: false, x: 0, y: -50, z: 0, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1, r: 1, g: 1, b: 1 });
+    flashPositions[i * 3 + 1] = -50;
+  }
+  const flashGeo = new THREE.BufferGeometry();
+  flashGeo.setAttribute('position', new THREE.BufferAttribute(flashPositions, 3));
+  flashGeo.setAttribute('color', new THREE.BufferAttribute(flashColors, 3));
+  const flashPointsMat = new THREE.PointsMaterial({ size: 1.05, vertexColors: true, transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending });
+  const flashPoints = new THREE.Points(flashGeo, flashPointsMat);
+  flashPoints.frustumCulled = false;
+  scene.add(flashPoints);
 
   const skidMat = new THREE.MeshBasicMaterial({ color: 0x0a0a0a, transparent: true, opacity: 0.55, depthWrite: false });
   const skidGeo = new THREE.PlaneGeometry(0.5, 1.4);
@@ -50,6 +73,7 @@ export function createEffects(scene) {
   return {
     particles, positions, colors, geo, points,
     flashSprite, flashMat, flashLight, flashTimer: 0,
+    flashParticles, flashPositions, flashColors, flashGeo, flashCursor: 0,
     skidMat, skidGeo, skids, scene,
     cursor: 0,
   };
@@ -88,16 +112,29 @@ export function burstSparks(fx, rng, x, y, z, count) {
   }
 }
 
+export function burstFlash(fx, rng, x, y, z, count) {
+  for (let i = 0; i < count; i++) {
+    const p = fx.flashParticles[fx.flashCursor];
+    fx.flashCursor = (fx.flashCursor + 1) % fx.flashParticles.length;
+    p.alive = true; p.x = x; p.y = y; p.z = z;
+    p.vx = rng.range(-7, 7); p.vy = rng.range(-5, 8); p.vz = rng.range(-7, 7);
+    p.life = rng.range(0.12, 0.22); p.maxLife = p.life;
+    const warm = rng.range(0, 1);
+    p.r = 1; p.g = 0.9 + warm * 0.1; p.b = 0.62 + warm * 0.33;
+  }
+}
+
 export function muzzleFlash(fx, rng, x, y, z, big) {
-  const scale = big ? 2.1 : 1.1;
+  const scale = big ? 3 : 1.8;
   fx.flashSprite.position.set(x, y, z);
   fx.flashSprite.scale.set(scale, scale, 1);
   fx.flashMat.opacity = 1;
   fx.flashSprite.visible = true;
   fx.flashLight.position.set(x, y, z);
-  fx.flashLight.intensity = big ? 90 : 40;
-  fx.flashTimer = 0.11;
-  burstSparks(fx, rng, x, y, z, big ? 16 : 8);
+  fx.flashLight.intensity = big ? 130 : 65;
+  fx.flashTimer = 0.09;
+  burstFlash(fx, rng, x, y, z, big ? 22 : 14);
+  burstSparks(fx, rng, x, y, z, big ? 10 : 5);
 }
 
 export function dropSkid(fx, x, z, angle) {
@@ -146,6 +183,30 @@ export function updateEffects(fx, dt) {
   }
   fx.geo.attributes.position.needsUpdate = true;
   fx.geo.attributes.color.needsUpdate = true;
+
+  for (let i = 0; i < fx.flashParticles.length; i++) {
+    const p = fx.flashParticles[i];
+    if (p.alive) {
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.alive = false;
+        p.y = -50;
+      } else {
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.z += p.vz * dt;
+      }
+    }
+    fx.flashPositions[i * 3] = p.x;
+    fx.flashPositions[i * 3 + 1] = p.y;
+    fx.flashPositions[i * 3 + 2] = p.z;
+    const fade = p.alive ? Math.min(1, p.life / (p.maxLife * 0.6)) : 0;
+    fx.flashColors[i * 3] = p.r * fade;
+    fx.flashColors[i * 3 + 1] = p.g * fade;
+    fx.flashColors[i * 3 + 2] = p.b * fade;
+  }
+  fx.flashGeo.attributes.position.needsUpdate = true;
+  fx.flashGeo.attributes.color.needsUpdate = true;
 
   if (fx.flashTimer > 0) {
     fx.flashTimer -= dt;
