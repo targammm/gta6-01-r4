@@ -1,24 +1,8 @@
 {
   "shots": [
-    {
-      "file": "1-chase.jpg",
-      "label": "Police chase at wanted level 4 — helicopter overhead",
-      "url": "/index.html?shot=chase&seed=20261120"
-    },
-    {
-      "file": "2-city.jpg",
-      "label": "Downtown street — steal the taxi",
-      "url": "/index.html?shot=city&seed=20261120"
-    },
-    {
-      "file": "3-mission.jpg",
-      "label": "Harbor Showdown — Viper firefight",
-      "url": "/index.html?shot=mission&seed=20261120"
-    },
-    {
-      "file": "4-title.jpg",
-      "label": "Title screen",
-      "url": "/index.html?shot=title&seed=20261120"
-    }
+    { "file": "1-chase.jpg", "url": "/index.html?shot=chase&seed=20261120" },
+    { "file": "2-city.jpg", "url": "/index.html?shot=city&seed=20261120" },
+    { "file": "3-mission.jpg", "url": "/index.html?shot=mission&seed=20261120" },
+    { "file": "4-title.jpg", "url": "/index.html?shot=title&seed=20261120" }
   ]
 }

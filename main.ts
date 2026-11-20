@@ -1,25 +1,29 @@
-// main.ts — Solmar Bay r4 build plumbing: copies game/ + screenshots/ into the
-// output directory and writes the make.fun dossier next to them.
-import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { buildDossier } from "./vendor/makefun-game.ts";
+// main.ts — the entry program the bounty runs: copy game/ and screenshots/
+// into the output directory, then write dossier.json with the kit's own
+// buildDossier, so the handed-in dossier is byte-identical to what the
+// scorer computes from the same tree.
 
-const root = import.meta.dirname;
-const outDir = process.env.MAKEFUN_OUTPUT_DIR
-  ? join(root, process.env.MAKEFUN_OUTPUT_DIR)
-  : join(root, "out");
+import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { buildDossier } from './vendor/makefun-game.ts';
 
-rmSync(outDir, { recursive: true, force: true });
-mkdirSync(outDir, { recursive: true });
-cpSync(join(root, "game"), join(outDir, "game"), { recursive: true });
-cpSync(join(root, "screenshots"), join(outDir, "screenshots"), { recursive: true });
+const root = dirname(fileURLToPath(import.meta.url));
+const outEnv = process.env.MAKEFUN_OUTPUT_DIR;
+const outputDir = outEnv ? resolve(root, outEnv) : '/output';
 
-const dossierText = buildDossier(outDir, {
+mkdirSync(outputDir, { recursive: true });
+for (const name of ['game', 'screenshots']) {
+  rmSync(join(outputDir, name), { recursive: true, force: true });
+  cpSync(join(root, name), join(outputDir, name), { recursive: true });
+}
+
+const dossier = buildDossier(outputDir, {
   text_max_bytes: 163840,
   screenshots: { max: 4, max_bytes: 262144 },
   game_max_files: 993,
   game_max_bytes: 50331648,
   game_path_max_bytes: 1000,
 });
-writeFileSync(join(outDir, "dossier.json"), dossierText);
-console.log(`dossier written: ${Buffer.byteLength(dossierText)} bytes (cap 1.5 MiB)`);
+writeFileSync(join(outputDir, 'dossier.json'), dossier);
+console.log(`dossier.json written to ${outputDir} (${dossier.length} bytes)`);
